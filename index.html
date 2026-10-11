@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en-GB"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Budget">
+<meta name="theme-color" content="#0f766e">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>Budget</title>
+<link rel="stylesheet" href="style.css">
+</head><body>
+<header id="top"></header>
+<main id="main"></main>
+<nav id="tabs">
+ <button data-tab="month">📅<span>Month</span></button>
+ <button data-tab="recurring">🔁<span>Recurring</span></button>
+ <button data-tab="analysis">📊<span>Analysis</span></button>
+ <button data-tab="settings">⚙️<span>Settings</span></button>
+</nav>
+<div id="modal" hidden><div id="sheet"></div></div>
+<script src="app.js"></script>
+</body></html>
