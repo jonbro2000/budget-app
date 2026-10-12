@@ -14,7 +14,7 @@ const mshort=k=>{const[y,m]=k.split('-').map(Number);return new Date(y,m-1,1).to
 const dim=k=>{const[y,m]=k.split('-').map(Number);return new Date(y,m,0).getDate()};
 const cmp=(a,b)=>a<b?-1:a>b?1:0;
 
-const DV=3;
+const DV=4;
 function seedAccounts(op){return[{id:'a1',name:'Current Account 1',type:'current',opening:r2(op||0)},{id:'a2',name:'Current Account 2',type:'current',opening:0},{id:'a3',name:'Credit Card',type:'card',opening:0}]}
 function blank(){return{version:DV,startMonth:curMonth(),accounts:seedAccounts(0),categories:[],recurring:[],months:{},plans:{}}}
 function migrate(d){ // upgrade any older data shape to current version
@@ -38,6 +38,8 @@ function migrate(d){ // upgrade any older data shape to current version
       if(Object.keys(p.ov).length||p.extra.length)d.plans[k]=p;delete d.months[k]});
   }
   Object.values(d.plans).forEach(p=>{p.ov=p.ov||{};p.extra=p.extra||[];p.extra.forEach(fix)});
+  const okM=v=>typeof v==='string'&&/^\d{4}-\d{2}$/.test(v);
+  d.recurring.forEach(r=>{if(!okM(r.from))delete r.from;if(!okM(r.until))delete r.until;if(r.from&&r.until&&cmp(r.until,r.from)<0)delete r.until});
   d.version=DV;return d;
 }
 function load(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.months)return migrate(s)}catch(e){}return blank()}
@@ -58,7 +60,7 @@ function itemsOf(k){ // real items if set up, else projection from recurring
   const m=S.months[k];
   if(m)return m.items;
   const p=S.plans[k]||{ov:{},extra:[]},out=[];
-  S.recurring.forEach(r=>{const o=p.ov[r.id]||{};if(o.skip)return;
+  S.recurring.forEach(r=>{if(!activeIn(r,k))return;const o=p.ov[r.id]||{};if(o.skip)return;
     const it={id:'p'+r.id,rid:r.id,name:r.name,type:r.type,amount:upAmt(r,k),day:Math.min(r.day,dim(k)),cat:r.cat,account:r.account,to:r.to,paid:false,projected:true};
     Object.assign(it,o);it.day=Math.min(it.day,dim(k));if(Object.keys(o).length)it.adjusted=true;out.push(it)});
   p.extra.forEach(e=>out.push({...e,id:'e'+e.id,paid:false,projected:true,extra:true}));
@@ -66,6 +68,9 @@ function itemsOf(k){ // real items if set up, else projection from recurring
 }
 // annual uplift: amount rises by uplift% each full year from upFrom (projections only)
 function upAmt(r,k){if(!r.uplift||!r.upFrom||cmp(k,r.upFrom)<0)return r.amount;const[y1,m1]=r.upFrom.split('-').map(Number),[y2,m2]=k.split('-').map(Number);const yrs=Math.floor(((y2-y1)*12+m2-m1)/12)+1;return r2(r.amount*Math.pow(1+r.uplift/100,yrs))}
+const activeIn=(r,k)=>(!r.from||cmp(k,r.from)>=0)&&(!r.until||cmp(k,r.until)<=0);
+function rangeTxt(r){const n=curMonth();if(r.until&&cmp(r.until,n)<0)return'ended '+mshort(r.until);const a=[];if(r.from&&cmp(r.from,n)>0)a.push('from '+mshort(r.from));else if(r.from)a.push('since '+mshort(r.from));if(r.until)a.push('until '+mshort(r.until));return a.join(' ')}
+const ended=r=>r.until&&cmp(r.until,curMonth())<0;
 const status=k=>{const c=cmp(k,curMonth());return c<0?'past':c>0?'future':'current'};
 const isFut=k=>status(k)==='future';
 const isTr=i=>i.type==='transfer';
@@ -275,9 +280,11 @@ function rRecurring(){
   let h=`<button class="pri fab" id="addr">+ Add recurring item</button>`;
   if(!S.recurring.length)h+=`<div class="card"><div class="empty">No recurring items yet. Add your wages, bills, card payoff and so on.</div></div>`;
   S.accounts.forEach(a=>{
-    const list=S.recurring.filter(r=>r.account===a.id).sort((x,y)=>x.day-y.day);if(!list.length)return;
-    h+=`<div class="card"><h2>${esc(a.name)}</h2>`+list.map(r=>`<div class="row" data-r="${r.id}"><div class="info"><div class="nm">${r.type==='transfer'?'⇄ ':''}${esc(r.name)}</div><div class="sub">Day ${r.day} · ${r.type==='transfer'?'transfer → '+esc(aname(r.to)):esc(r.cat)+' · '+r.type}${r.uplift?' · +'+r.uplift+'%/yr':''}</div></div><div class="amt ${r.type==='transfer'?'trf':r.type==='income'?'inc':'out'}">${gbp(r.amount)}</div></div>`).join('')+'</div>';
+    const list=S.recurring.filter(r=>r.account===a.id&&!ended(r)).sort((x,y)=>x.day-y.day);if(!list.length)return;
+    h+=`<div class="card"><h2>${esc(a.name)}</h2>`+list.map(r=>`<div class="row" data-r="${r.id}"><div class="info"><div class="nm">${r.type==='transfer'?'⇄ ':''}${esc(r.name)}</div><div class="sub">Day ${r.day} · ${r.type==='transfer'?'transfer → '+esc(aname(r.to)):esc(r.cat)+' · '+r.type}${r.uplift?' · +'+r.uplift+'%/yr':''}${rangeTxt(r)?' · <b>'+rangeTxt(r)+'</b>':''}</div></div><div class="amt ${r.type==='transfer'?'trf':r.type==='income'?'inc':'out'}">${gbp(r.amount)}</div></div>`).join('')+'</div>';
   });
+  const old=S.recurring.filter(ended);
+  if(old.length)h+=`<div class="card dim"><h2>Ended</h2>`+old.map(r=>`<div class="row" data-r="${r.id}"><div class="info"><div class="nm">${esc(r.name)}</div><div class="sub">${esc(aname(r.account))} · ${rangeTxt(r)}</div></div><div class="amt">${gbp(r.amount)}</div></div>`).join('')+'</div>';
   $('#main').innerHTML=h;
   $('#addr').onclick=()=>editRec(null);
   document.querySelectorAll('[data-r]').forEach(e=>e.onclick=()=>editRec(e.dataset.r));
@@ -286,15 +293,21 @@ function editRec(id){
   const isNew=!id,r=isNew?{name:'',type:'outgoing',amount:'',day:1,cat:'Other',account:S.accounts[0].id}:S.recurring.find(x=>x.id===id);
   modal(`<h2>${isNew?'Add':'Edit'} recurring item</h2>
   ${entryForm(r,'f_','Default amount (£)')}
+  <label>Starts (optional)</label><input type="month" id="f_from" value="${r.from||''}">
+  <label>Ends (optional, last month inclusive)</label><input type="month" id="f_until" value="${r.until||''}">
+  <label>…or ends after N payments</label><input id="f_n" type="number" min="1" inputmode="numeric" placeholder="e.g. 18"><div class="sub mut" id="f_nh">Counts from the start month, or this month if no start.</div>
   <label>Annual rise % (optional, projections only)</label><input id="f_up" inputmode="decimal" value="${r.uplift||''}" placeholder="e.g. 5">
   <label>Rises each year from</label><input type="month" id="f_upf" value="${r.upFrom||addM(curMonth(),1)}">
   <div class="btns"><button id="c">Cancel</button><button class="pri" id="s">Save</button></div>
   ${isNew?'':'<div class="btns"><button class="danger" id="d">Delete</button></div><div class="sub mut">Deleting keeps entries already in past/set-up months.</div>'}`);
   const get=bindForm('f_',r.type);
+  $('#f_n').oninput=()=>{const n=parseInt($('#f_n').value);if(n>0){const u=addM($('#f_from').value||curMonth(),n-1);$('#f_until').value=u;$('#f_nh').textContent='Last payment: '+mlabel(u)}};
   $('#c').onclick=closeModal;
   $('#s').onclick=()=>{const o=get();if(!o)return;
+    o.from=$('#f_from').value||undefined;o.until=$('#f_until').value||undefined;
+    if(o.from&&o.until&&cmp(o.until,o.from)<0)return alert('End month is before start month.');
     const up=parseFloat($('#f_up').value);if(isFinite(up)&&up!==0){o.uplift=r2(up);o.upFrom=$('#f_upf').value||addM(curMonth(),1)}else{o.uplift=undefined;o.upFrom=undefined}
-    const cl=x=>{['to','uplift','upFrom'].forEach(f=>{if(x[f]===undefined)delete x[f]});return x};if(isNew)S.recurring.push(cl({id:uid(),...o}));else cl(Object.assign(r,o))
+    const cl=x=>{['to','uplift','upFrom','from','until'].forEach(f=>{if(x[f]===undefined)delete x[f]});return x};if(isNew)S.recurring.push(cl({id:uid(),...o}));else cl(Object.assign(r,o))
     save();closeModal();render()};
   if($('#d'))$('#d').onclick=()=>{if(!confirm('Delete "'+r.name+'"?'))return;S.recurring=S.recurring.filter(x=>x.id!==id);save();closeModal();render()};
 }

@@ -55,3 +55,4 @@ h2{font-size:18px;margin:0 0 8px}
 table.fc{font-size:13px}table.fc td,table.fc th{padding:7px 3px;white-space:nowrap}
 tr[data-k]{cursor:pointer}tr.neg td{background:#fee2e2}tr.low td{border-top:2px solid #b91c1c;border-bottom:2px solid #b91c1c}tr.yr td{font-weight:700;background:#f1f5f9}
 nav button{font-size:20px}
+.dim{opacity:.6}
