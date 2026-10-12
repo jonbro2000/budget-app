@@ -14,11 +14,11 @@ const mshort=k=>{const[y,m]=k.split('-').map(Number);return new Date(y,m-1,1).to
 const dim=k=>{const[y,m]=k.split('-').map(Number);return new Date(y,m,0).getDate()};
 const cmp=(a,b)=>a<b?-1:a>b?1:0;
 
-const DV=2;
+const DV=3;
 function seedAccounts(op){return[{id:'a1',name:'Current Account 1',type:'current',opening:r2(op||0)},{id:'a2',name:'Current Account 2',type:'current',opening:0},{id:'a3',name:'Credit Card',type:'card',opening:0}]}
-function blank(){return{version:DV,startMonth:curMonth(),accounts:seedAccounts(0),categories:[],recurring:[],months:{}}}
+function blank(){return{version:DV,startMonth:curMonth(),accounts:seedAccounts(0),categories:[],recurring:[],months:{},plans:{}}}
 function migrate(d){ // upgrade any older data shape to current version
-  d=Object.assign({categories:[],recurring:[],months:{}},d);
+  d=Object.assign({categories:[],recurring:[],months:{},plans:{}},d);
   if(!d.startMonth)d.startMonth=curMonth();
   if(!(d.version>=2)){
     if(!Array.isArray(d.accounts)||!d.accounts.length)d.accounts=seedAccounts(+d.opening||0);
@@ -27,6 +27,17 @@ function migrate(d){ // upgrade any older data shape to current version
   const ids=d.accounts.map(a=>a.id),def=ids[0];
   const fix=i=>{if(!ids.includes(i.account))i.account=def;if(i.type==='transfer'){if(!ids.includes(i.to)||i.to===i.account)i.to=ids.find(x=>x!==i.account);i.cat='Transfer'}else delete i.to};
   d.recurring.forEach(fix);Object.values(d.months).forEach(m=>(m.items||(m.items=[])).forEach(fix));
+  if(!(d.version>=3)){ // future months that were 'started' but nothing ticked -> sparse overrides
+    const now=curMonth();
+    Object.keys(d.months).forEach(k=>{const m=d.months[k];if(cmp(k,now)<=0||m.items.some(i=>i.paid))return;
+      const p={ov:{},extra:[]};
+      d.recurring.forEach(r=>{const it=m.items.find(i=>i.rid===r.id);if(!it){p.ov[r.id]={skip:true};return}
+        const o={};['name','type','amount','day','cat','account','to'].forEach(f=>{if(it[f]!==undefined&&it[f]!==r[f]&&!(f==='day'&&it.day===Math.min(r.day,dim(k))))o[f]=it[f]});
+        if(Object.keys(o).length)p.ov[r.id]=o});
+      m.items.filter(i=>!i.rid||!d.recurring.some(r=>r.id===i.rid)).forEach(i=>{const e={...i,rid:null};delete e.paid;p.extra.push(e)});
+      if(Object.keys(p.ov).length||p.extra.length)d.plans[k]=p;delete d.months[k]});
+  }
+  Object.values(d.plans).forEach(p=>{p.ov=p.ov||{};p.extra=p.extra||[];p.extra.forEach(fix)});
   d.version=DV;return d;
 }
 function load(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.months)return migrate(s)}catch(e){}return blank()}
@@ -39,14 +50,24 @@ const aname=id=>(acc(id)||{name:'?'}).name;
 const isCard=id=>(acc(id)||{}).type==='card';
 const fmtBal=(id,v)=>isCard(id)?(v<=0?gbp(-v)+' owed':gbp(v)+' in credit'):gbp(v);
 let tab='month',view=curMonth(),mFilter='all';
+const TODAY0=curMonth();
 if(cmp(view,S.startMonth)<0)view=S.startMonth;
 
 // ---- model
 function itemsOf(k){ // real items if set up, else projection from recurring
   const m=S.months[k];
   if(m)return m.items;
-  return S.recurring.map(r=>({id:'p'+r.id,rid:r.id,name:r.name,type:r.type,amount:r.amount,day:Math.min(r.day,dim(k)),cat:r.cat,account:r.account,to:r.to,paid:false,projected:true}));
+  const p=S.plans[k]||{ov:{},extra:[]},out=[];
+  S.recurring.forEach(r=>{const o=p.ov[r.id]||{};if(o.skip)return;
+    const it={id:'p'+r.id,rid:r.id,name:r.name,type:r.type,amount:upAmt(r,k),day:Math.min(r.day,dim(k)),cat:r.cat,account:r.account,to:r.to,paid:false,projected:true};
+    Object.assign(it,o);it.day=Math.min(it.day,dim(k));if(Object.keys(o).length)it.adjusted=true;out.push(it)});
+  p.extra.forEach(e=>out.push({...e,id:'e'+e.id,paid:false,projected:true,extra:true}));
+  return out;
 }
+// annual uplift: amount rises by uplift% each full year from upFrom (projections only)
+function upAmt(r,k){if(!r.uplift||!r.upFrom||cmp(k,r.upFrom)<0)return r.amount;const[y1,m1]=r.upFrom.split('-').map(Number),[y2,m2]=k.split('-').map(Number);const yrs=Math.floor(((y2-y1)*12+m2-m1)/12)+1;return r2(r.amount*Math.pow(1+r.uplift/100,yrs))}
+const status=k=>{const c=cmp(k,curMonth());return c<0?'past':c>0?'future':'current'};
+const isFut=k=>status(k)==='future';
 const isTr=i=>i.type==='transfer';
 const effect=(i,a)=>i.type==='income'?(i.account===a?i.amount:0):i.type==='outgoing'?(i.account===a?-i.amount:0):(i.account===a?-i.amount:0)+(i.to===a?i.amount:0);
 const touches=(i,a)=>i.account===a||(isTr(i)&&i.to===a);
@@ -96,30 +117,33 @@ function render(){
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===tab));
   $('#top').innerHTML='<h1>Budget</h1>';
   if(mFilter!=='all'&&!acc(mFilter))mFilter='all';
-  ({month:rMonth,recurring:rRecurring,analysis:rAnalysis,settings:rSettings})[tab]();
+  ({month:rMonth,forecast:rForecast,recurring:rRecurring,analysis:rAnalysis,settings:rSettings})[tab]();
 }
 document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render();scrollTo(0,0)});
 const ord=d=>d%10==1&&d!=11?'st':d%10==2&&d!=12?'nd':d%10==3&&d!=13?'rd':'th';
 const sortI=(a,b)=>a.day-b.day||a.name.localeCompare(b.name);
 
 function entryRow(i,a,setup){
+  const fut=isFut(view);
   const e=effect(i,a),tr=isTr(i);
   const sub=tr?(i.account===a?'→ '+esc(aname(i.to)):'← '+esc(aname(i.account)))+' · transfer':esc(i.cat);
   return `<div class="row ${i.paid?'done':''}">
-   <input type="checkbox" class="chk" data-id="${i.id}" ${i.paid?'checked':''} ${setup?'':'disabled'} aria-label="paid/received">
-   <div class="info" data-edit="${i.id}"><div class="nm">${tr?'⇄ ':''}${esc(i.name)}</div><div class="sub">${i.day}${ord(i.day)} · ${sub}${i.rid?'':' · one-off'}</div></div>
+   ${fut?'':`<input type="checkbox" class="chk" data-id="${i.id}" ${i.paid?'checked':''} ${setup?'':'disabled'} aria-label="paid/received">`}
+   <div class="info" data-edit="${i.id}"><div class="nm">${tr?'⇄ ':''}${esc(i.name)}</div><div class="sub">${i.day}${ord(i.day)} · ${sub}${i.rid?'':' · one-off'}${i.adjusted?' <span class="tag adj">adjusted</span>':''}</div></div>
    <div class="amt ${tr?'trf':e>=0?'inc':'out'}" data-edit="${i.id}">${e>=0?'+':'-'}${gbp(Math.abs(e))}</div></div>`;
 }
 function rMonth(){
-  const k=view,setup=!!S.months[k],items=itemsOf(k).slice().sort(sortI);
+  const k=view,setup=!!S.months[k],fut=isFut(k),st=status(k),items=itemsOf(k).slice().sort(sortI);
   const shown=mFilter==='all'?S.accounts:S.accounts.filter(a=>a.id===mFilter);
-  let h=`<div class="card nav"><button class="sm" id="prev" ${cmp(k,S.startMonth)<=0?'disabled':''}>‹</button><b>${mlabel(k)}</b><button class="sm" id="next">›</button></div>`;
+  let h=`<div class="card nav"><button class="sm" id="prev" ${cmp(k,S.startMonth)<=0?'disabled':''}>‹</button><b>${mlabel(k)}<br><span class="st st-${st}">${st==='past'?'Past':st==='current'?'Current month':'Future · projection'}</span></b><button class="sm" id="next">›</button></div>`;
+  if(k!==curMonth())h+=`<div class="btns" style="margin:-4px 0 12px"><button id="today">Jump to current month</button></div>`;
   h+=`<select id="mf" aria-label="Account filter"><option value="all">All accounts (grouped)</option>${S.accounts.map(a=>`<option value="${a.id}" ${a.id===mFilter?'selected':''}>${esc(a.name)}</option>`).join('')}</select><div style="height:12px"></div>`;
-  if(!setup)h+=`<div class="card"><b>${mlabel(k)} isn't set up yet.</b><div class="mut">Showing projection from your recurring items.</div><div class="btns"><button class="pri" id="chk">Start month check-in</button></div></div>`;
+  if(fut)h+=`<div class="card"><b>Projection.</b><div class="mut">Built from your recurring items plus any changes you make here. Tap an item to adjust or skip it for this month only, or add a one-off. Future default changes still flow in unless adjusted.</div></div>`;
+  else if(!setup)h+=`<div class="card"><b>${mlabel(k)} isn't checked in yet.</b><div class="mut">Showing projection${S.plans[k]?' (with your planned changes)':''}.</div><div class="btns"><button class="pri" id="chk">Start month check-in</button></div></div>`;
   if(mFilter==='all'){
-    h+=`<div class="card"><h2>All accounts</h2><table><tr><th>Account</th><th>Opening</th><th>Closing</th><th>Cleared</th></tr>`+
-     S.accounts.map(a=>`<tr><td>${esc(a.name)}</td><td>${fmtBal(a.id,opening(k,a.id))}</td><td><b>${fmtBal(a.id,closing(k,a.id))}</b></td><td>${fmtBal(a.id,cleared(k,a.id))}</td></tr>`).join('')+
-     `<tr><td><b>Combined</b></td><td><b>${gbp(total(opening,k))}</b></td><td><b>${gbp(total(closing,k))}</b></td><td><b>${gbp(total(cleared,k))}</b></td></tr></table>
+    h+=`<div class="card"><h2>All accounts</h2><table><tr><th>Account</th><th>Opening</th><th>Closing</th>${fut?'':'<th>Cleared</th>'}</tr>`+
+     S.accounts.map(a=>`<tr><td>${esc(a.name)}</td><td>${fmtBal(a.id,opening(k,a.id))}</td><td><b>${fmtBal(a.id,closing(k,a.id))}</b></td>${fut?'':`<td>${fmtBal(a.id,cleared(k,a.id))}</td>`}</tr>`).join('')+
+     `<tr><td><b>Combined</b></td><td><b>${gbp(total(opening,k))}</b></td><td><b>${gbp(total(closing,k))}</b></td>${fut?'':`<td><b>${gbp(total(cleared,k))}</b></td>`}</tr></table>
      <div class="sub mut" style="font-size:13px">Combined = current accounts minus card balances owed. Closing is projected; cleared counts ticked items only.</div></div>`;
   }
   shown.forEach(a=>{
@@ -130,7 +154,7 @@ function rMonth(){
      <span>Opening ${card?'balance':'balance'}</span><span class="amt">${fmtBal(a.id,opening(k,a.id))}</span>
      <span>${card?'Payments / refunds in':'Money in'}</span><span class="amt inc">${gbp(inc)}</span><span>${card?'Card spending':'Money out'}</span><span class="amt out">${gbp(out)}</span>
      <span><b>Closing (projected)</b></span><span class="big ${card&&cl<0?'out':''}">${fmtBal(a.id,cl)}</span>
-     <span><b>Cleared so far</b></span><span class="amt">${fmtBal(a.id,cleared(k,a.id))}</span></div>
+     ${fut?'':`<span><b>Cleared so far</b></span><span class="amt">${fmtBal(a.id,cleared(k,a.id))}</span>`}</div>
      ${card&&cl<0?`<div class="btns"><button id="po_${a.id}" data-po="${a.id}">Pay off card balance (${gbp(-cl)})</button></div>`:''}
      <div style="margin-top:8px">${its.map(i=>entryRow(i,a.id,setup)).join('')||'<div class="empty">No entries.</div>'}</div></div>`;
   });
@@ -138,6 +162,7 @@ function rMonth(){
   $('#main').innerHTML=h;
   $('#prev').onclick=()=>{view=addM(k,-1);render();maybeCheckin()};
   $('#next').onclick=()=>{view=addM(k,1);render();maybeCheckin()};
+  if($('#today'))$('#today').onclick=()=>{view=curMonth();render();maybeCheckin()};
   $('#mf').onchange=()=>{mFilter=$('#mf').value;render()};
   if($('#chk'))$('#chk').onclick=()=>startCheckin(k);
   $('#addone').onclick=()=>editEntry(null);
@@ -146,10 +171,10 @@ function rMonth(){
   document.querySelectorAll('[data-po]').forEach(b=>b.onclick=()=>payOff(k,b.dataset.po));
 }
 let asked={};
-function maybeCheckin(){ if(!S.months[view]&&S.recurring.length&&!asked[view]){asked[view]=1;startCheckin(view)} }
+function maybeCheckin(){ if(!isFut(view)&&!S.months[view]&&S.recurring.length&&!asked[view]){asked[view]=1;startCheckin(view)} }
 
 // edit/add entry in month (materialises the month if needed)
-function ensureMonth(k){if(!S.months[k])S.months[k]={items:itemsOf(k).map(i=>{const c={...i};delete c.projected;c.id=uid();return c})};return S.months[k]}
+function ensureMonth(k){if(!S.months[k]){S.months[k]={items:itemsOf(k).map(i=>{const c={...i};delete c.projected;delete c.adjusted;if(c.extra){c.rid=null;delete c.extra}c.id=uid();return c})};delete S.plans[k]}return S.months[k]}
 function editEntry(id,preset){
   const k=view;let it=null;
   if(id)it=itemsOf(k).find(x=>x.id===id);
@@ -157,11 +182,12 @@ function editEntry(id,preset){
   modal(`<h2>${isNew?'Add one-off item':'Edit entry'} · ${mshort(k)}</h2>
   ${entryForm(it,'f_')}
   ${it.rid?`<label class="ck"><input type="checkbox" id="f_def"> Also update default amount going forward</label>`:''}
-  <label class="ck"><input type="checkbox" id="f_paid" ${it.paid?'checked':''}> Paid / received</label>
+  ${isFut(k)?`<div class="sub mut">${it.rid?'Changes apply to '+mlabel(k)+' only.':''}</div>${it.adjusted?'<div class="btns"><button id="rst">Reset to default</button></div>':''}`:`<label class="ck"><input type="checkbox" id="f_paid" ${it.paid?'checked':''}> Paid / received</label>`}
   <div class="btns"><button id="c">Cancel</button><button class="pri" id="s">Save</button></div>
-  ${isNew?'':'<div class="btns"><button class="danger" id="d">Delete from this month</button></div>'}`);
+  ${isNew?'':`<div class="btns"><button class="danger" id="d">${isFut(k)&&it.rid?'Skip this month':'Delete from this month'}</button></div>`}`);
   const get=bindForm('f_',it.type);
   $('#c').onclick=closeModal;
+  if(isFut(k))return planEdit(k,it,isNew,get);
   $('#s').onclick=()=>{
     const o=get();if(!o)return;
     const m=ensureMonth(k);
@@ -174,6 +200,20 @@ function editEntry(id,preset){
   };
   if($('#d'))$('#d').onclick=()=>{if(!confirm('Delete this entry from '+mlabel(k)+'?'))return;const m=ensureMonth(k);m.items=m.items.filter(x=>x.id!==id&&!(it.rid&&x.rid===it.rid&&id.startsWith('p')));save();closeModal();render()};
 }
+const plan=k=>S.plans[k]||(S.plans[k]={ov:{},extra:[]});
+function tidyPlan(k){const p=S.plans[k];if(p&&!Object.keys(p.ov).length&&!p.extra.length)delete S.plans[k]}
+function planEdit(k,it,isNew,get){
+  $('#s').onclick=()=>{const o=get();if(!o)return;const p=plan(k);
+    if(isNew){const e={id:uid(),rid:null,...o};if(e.to===undefined)delete e.to;p.extra.push(e)}
+    else if(it.extra){const e=p.extra.find(x=>'e'+x.id===it.id);Object.assign(e,o);if(e.to===undefined)delete e.to}
+    else{const r=S.recurring.find(x=>x.id===it.rid),ov={};
+      ['name','type','amount','day','cat','account','to'].forEach(f=>{const base=f==='amount'?upAmt(r,k):f==='day'?Math.min(r.day,dim(k)):r[f];if(o[f]!==undefined&&o[f]!==base)ov[f]=o[f]});
+      if($('#f_def')&&$('#f_def').checked){r.amount=o.amount;delete ov.amount}
+      if(Object.keys(ov).length)p.ov[r.id]=ov;else delete p.ov[r.id]}
+    tidyPlan(k);save();closeModal();render()};
+  if($('#rst'))$('#rst').onclick=()=>{delete plan(k).ov[it.rid];tidyPlan(k);save();closeModal();render()};
+  if($('#d'))$('#d').onclick=()=>{const p=plan(k);if(it.extra)p.extra=p.extra.filter(x=>'e'+x.id!==it.id);else p.ov[it.rid]={skip:true};tidyPlan(k);save();closeModal();render()};
+}
 function payOff(k,cardId){
   const owed=-closing(k,cardId);if(!(owed>0))return;
   const from=(S.accounts.find(a=>a.type!=='card')||S.accounts.find(a=>a.id!==cardId)).id;
@@ -183,11 +223,13 @@ function payOff(k,cardId){
 // ---- check-in
 function startCheckin(k){
   const prev=addM(k,-1),pm=S.months[prev],ai=id=>S.accounts.findIndex(a=>a.id===id);
-  const queue=S.recurring.slice().sort((a,b)=>ai(a.account)-ai(b.account)||a.day-b.day).map(r=>{
-    const p=pm&&pm.items.find(x=>x.rid===r.id);
-    return{r,last:p?p.amount:r.amount};
+  const proj=itemsOf(k).filter(x=>!x.extra);
+  const queue=proj.slice().sort((a,b)=>ai(a.account)-ai(b.account)||a.day-b.day).map(pi=>{
+    const r0=S.recurring.find(x=>x.id===pi.rid),p=pm&&pm.items.find(x=>x.rid===pi.rid);
+    const r=Object.assign(Object.create(null),{...r0,...pi,id:r0.id,day:pi.day});r.base=r0;
+    return{r,last:pi.adjusted&&'amount' in ((S.plans[k]||{ov:{}}).ov[pi.rid]||{})?pi.amount:p?p.amount:pi.amount};
   });
-  const out=[];let i=0;
+  const out=(S.plans[k]?S.plans[k].extra:[]).map(e=>({...e,id:uid(),rid:null,paid:false}));let i=0;
   function step(){
     if(i>=queue.length)return oneoffs();
     const q=queue[i],r=q.r,tr=r.type==='transfer';
@@ -208,7 +250,7 @@ function startCheckin(k){
       <div class="btns"><button class="pri" id="ok">Next</button></div>`;
       $('#na').focus();
       $('#ok').onclick=()=>{const a=num($('#na').value);if(isNaN(a))return alert('Enter an amount');
-        if($('#nd').checked)r.amount=a;add(a)};
+        if($('#nd').checked)r.base.amount=a;add(a)};
     };
   }
   let lastAcc=S.accounts[0].id;
@@ -223,7 +265,7 @@ function startCheckin(k){
     $('#oa').onclick=()=>{const o=get();if(!o)return;push(o);oneoffs()};
     $('#fin').onclick=()=>{ // add pending if filled
       if($('#o_name').value.trim()||$('#o_amt').value.trim()){const o=get();if(!o)return;push(o)}
-      S.months[k]={items:out};save();closeModal();render()};
+      S.months[k]={items:out};delete S.plans[k];save();closeModal();render()};
   }
   step();
 }
@@ -234,7 +276,7 @@ function rRecurring(){
   if(!S.recurring.length)h+=`<div class="card"><div class="empty">No recurring items yet. Add your wages, bills, card payoff and so on.</div></div>`;
   S.accounts.forEach(a=>{
     const list=S.recurring.filter(r=>r.account===a.id).sort((x,y)=>x.day-y.day);if(!list.length)return;
-    h+=`<div class="card"><h2>${esc(a.name)}</h2>`+list.map(r=>`<div class="row" data-r="${r.id}"><div class="info"><div class="nm">${r.type==='transfer'?'⇄ ':''}${esc(r.name)}</div><div class="sub">Day ${r.day} · ${r.type==='transfer'?'transfer → '+esc(aname(r.to)):esc(r.cat)+' · '+r.type}</div></div><div class="amt ${r.type==='transfer'?'trf':r.type==='income'?'inc':'out'}">${gbp(r.amount)}</div></div>`).join('')+'</div>';
+    h+=`<div class="card"><h2>${esc(a.name)}</h2>`+list.map(r=>`<div class="row" data-r="${r.id}"><div class="info"><div class="nm">${r.type==='transfer'?'⇄ ':''}${esc(r.name)}</div><div class="sub">Day ${r.day} · ${r.type==='transfer'?'transfer → '+esc(aname(r.to)):esc(r.cat)+' · '+r.type}${r.uplift?' · +'+r.uplift+'%/yr':''}</div></div><div class="amt ${r.type==='transfer'?'trf':r.type==='income'?'inc':'out'}">${gbp(r.amount)}</div></div>`).join('')+'</div>';
   });
   $('#main').innerHTML=h;
   $('#addr').onclick=()=>editRec(null);
@@ -244,12 +286,15 @@ function editRec(id){
   const isNew=!id,r=isNew?{name:'',type:'outgoing',amount:'',day:1,cat:'Other',account:S.accounts[0].id}:S.recurring.find(x=>x.id===id);
   modal(`<h2>${isNew?'Add':'Edit'} recurring item</h2>
   ${entryForm(r,'f_','Default amount (£)')}
+  <label>Annual rise % (optional, projections only)</label><input id="f_up" inputmode="decimal" value="${r.uplift||''}" placeholder="e.g. 5">
+  <label>Rises each year from</label><input type="month" id="f_upf" value="${r.upFrom||addM(curMonth(),1)}">
   <div class="btns"><button id="c">Cancel</button><button class="pri" id="s">Save</button></div>
   ${isNew?'':'<div class="btns"><button class="danger" id="d">Delete</button></div><div class="sub mut">Deleting keeps entries already in past/set-up months.</div>'}`);
   const get=bindForm('f_',r.type);
   $('#c').onclick=closeModal;
   $('#s').onclick=()=>{const o=get();if(!o)return;
-    if(isNew){const n={id:uid(),...o};if(n.to===undefined)delete n.to;S.recurring.push(n)}else{Object.assign(r,o);if(r.to===undefined)delete r.to}
+    const up=parseFloat($('#f_up').value);if(isFinite(up)&&up!==0){o.uplift=r2(up);o.upFrom=$('#f_upf').value||addM(curMonth(),1)}else{o.uplift=undefined;o.upFrom=undefined}
+    const cl=x=>{['to','uplift','upFrom'].forEach(f=>{if(x[f]===undefined)delete x[f]});return x};if(isNew)S.recurring.push(cl({id:uid(),...o}));else cl(Object.assign(r,o))
     save();closeModal();render()};
   if($('#d'))$('#d').onclick=()=>{if(!confirm('Delete "'+r.name+'"?'))return;S.recurring=S.recurring.filter(x=>x.id!==id);save();closeModal();render()};
 }
@@ -294,6 +339,47 @@ function trend(months){
     s+=`<rect x="${cx-w-1}" y="${H-h1}" width="${w}" height="${h1}" fill="#15803d" rx="2"/><rect x="${cx+1}" y="${H-h2}" width="${w}" height="${h2}" fill="#b91c1c" rx="2"/>`;
     if(d.length<=6||i%2==0)s+=`<text x="${cx}" y="${H+15}" text-anchor="middle" font-size="10" fill="#6b7783">${mshort(x[0]).split(' ')[0]}</text>`});
   return s+`</svg><div class="mut" style="font-size:13px"><span class="sw" style="background:#15803d"></span>Income <span class="sw" style="background:#b91c1c;margin-left:10px"></span>Outgoings</div>`;
+}
+
+// ---- forecast
+let fH=12;
+const ACOL=['#2563eb','#d97706','#9333ea','#db2777','#0891b2','#65a30d'];
+function rForecast(){
+  const now=curMonth(),months=[];for(let i=0;i<fH;i++)months.push(addM(now,i));
+  const rows=months.map(k=>{const it=itemsOf(k);const inc=sumT(it,'income'),out=sumT(it,'outgoing');
+    const bal={};S.accounts.forEach(a=>bal[a.id]=closing(k,a.id));return{k,inc,out,net:r2(inc-out),bal,tot:total(closing,k)}});
+  const low=rows.reduce((m,r)=>r.tot<m.tot?r:m,rows[0]);
+  const neg=r=>S.accounts.some(a=>a.type!=='card'&&r.bal[a.id]<0);
+  const firstNeg=rows.find(neg);
+  const W=340,H=180,P=6,vals=rows.flatMap(r=>[r.tot,...Object.values(r.bal)]),mn=Math.min(0,...vals),mx=Math.max(1,...vals);
+  const X=i=>P+i*(W-2*P)/Math.max(1,rows.length-1),Y=v=>P+(mx-v)/(mx-mn||1)*(H-2*P);
+  const line=(f,c,w)=>`<polyline fill="none" stroke="${c}" stroke-width="${w}" points="${rows.map((r,i)=>X(i).toFixed(1)+','+Y(f(r)).toFixed(1)).join(' ')}"/>`;
+  let svg=`<svg viewBox="0 0 ${W} ${H+18}" style="width:100%"><line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="#94a3b8" stroke-dasharray="3 3"/>`;
+  S.accounts.forEach((a,j)=>svg+=line(r=>r.bal[a.id],ACOL[j%ACOL.length],1.5));
+  svg+=line(r=>r.tot,'#0f766e',3);
+  const li=rows.indexOf(low);svg+=`<circle cx="${X(li)}" cy="${Y(low.tot)}" r="4" fill="#b91c1c"/>`;
+  rows.forEach((r,i)=>{if(r.k.endsWith('-01')||(i===0&&+r.k.slice(5)<11))svg+=`<text x="${X(i)}" y="${H+14}" font-size="10" text-anchor="${i===0?'start':'middle'}" fill="#6b7783">${mshort(r.k)}</text>`});
+  svg+='</svg>';
+  const legend=`<div class="mut" style="font-size:13px"><span class="sw" style="background:#0f766e"></span>Combined ${S.accounts.map((a,j)=>`<span class="sw" style="background:${ACOL[j%ACOL.length]};margin-left:8px"></span>${esc(a.name)}`).join(' ')} <span class="sw" style="background:#b91c1c;border-radius:6px;margin-left:8px"></span>Lowest</div>`;
+  let h=`<div class="seg">${[[12,'12 months'],[24,'2 years'],[36,'3 years'],[60,'5 years']].map(([n,l])=>`<button data-h="${n}" class="${n===fH?'on':''}">${l}</button>`).join('')}</div>
+  <div class="card"><h2>Projected month-end balances</h2>${svg}${legend}
+  <div class="sum" style="margin-top:10px"><span>Lowest combined</span><span class="amt ${low.tot<0?'out':''}">${gbp(low.tot)} · ${mshort(low.k)}</span>
+  <span>End of horizon</span><span class="amt">${gbp(rows.at(-1).tot)} · ${mshort(rows.at(-1).k)}</span></div>
+  ${firstNeg?`<div class="warn">⚠️ A current account goes overdrawn in ${mlabel(firstNeg.k)}.</div>`:''}</div>
+  <div class="card"><h2>By month</h2><div class="sub mut" style="font-size:13px">Tap a month to open it. Transfers excluded from in/out. Closing = combined.</div>
+  <table class="fc"><tr><th>Month</th><th>In</th><th>Out</th><th>Net</th><th>Closing</th></tr>`;
+  let ya={inc:0,out:0};
+  rows.forEach((r,i)=>{
+    h+=`<tr data-k="${r.k}" class="${neg(r)?'neg':''} ${r===low?'low':''}"><td>${mshort(r.k)}${r.k===now?' •':''}</td><td class="inc">${gbp(r.inc)}</td><td class="out">${gbp(r.out)}</td><td>${gbp(r.net)}</td><td><b>${gbp(r.tot)}</b></td></tr>`;
+    ya.inc=r2(ya.inc+r.inc);ya.out=r2(ya.out+r.out);
+    const nx=rows[i+1];if(!nx||nx.k.slice(0,4)!==r.k.slice(0,4)){h+=`<tr class="yr"><td>${r.k.slice(0,4)} total</td><td>${gbp(ya.inc)}</td><td>${gbp(ya.out)}</td><td>${gbp(ya.inc-ya.out)}</td><td>${gbp(r.tot)}</td></tr>`;ya={inc:0,out:0}}
+  });
+  h+=`</table><div class="sub mut" style="font-size:13px;margin-top:6px">Red rows: a current account is below £0. Red border: lowest point.</div></div>
+  <div class="card"><h2>Per account (month-end)</h2><div style="overflow-x:auto"><table class="fc"><tr><th>Month</th>${S.accounts.map(a=>`<th>${esc(a.name)}</th>`).join('')}</tr>`+
+  rows.map(r=>`<tr data-k="${r.k}"><td>${mshort(r.k)}</td>${S.accounts.map(a=>`<td class="${r.bal[a.id]<0?'out':''}">${fmtBal(a.id,r.bal[a.id])}</td>`).join('')}</tr>`).join('')+`</table></div></div>`;
+  $('#main').innerHTML=h;
+  document.querySelectorAll('[data-h]').forEach(b=>b.onclick=()=>{fH=+b.dataset.h;render()});
+  document.querySelectorAll('tr[data-k]').forEach(t=>t.onclick=()=>{view=t.dataset.k;tab='month';render();scrollTo(0,0);maybeCheckin()});
 }
 
 // ---- settings
@@ -346,3 +432,4 @@ function editAcc(id){
 
 if('serviceWorker' in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(()=>{});
 render();
+setTimeout(maybeCheckin,300);

@@ -48,3 +48,10 @@ h2{font-size:18px;margin:0 0 8px}
 .acchdr{display:inline-block;font-size:13px;font-weight:700;background:#ccfbf1;color:#115e59;border-radius:8px;padding:3px 8px;margin-top:6px}
 .seg{flex-wrap:wrap}
 #main>select{margin-bottom:0}
+.st{font-size:12px;font-weight:700;border-radius:8px;padding:2px 8px}
+.st-past{background:#e5e7eb;color:#374151}.st-current{background:#ccfbf1;color:#115e59}.st-future{background:#e0e7ff;color:#3730a3}
+.tag.adj{background:#fef3c7;color:#92400e}
+.warn{margin-top:10px;padding:10px;border-radius:10px;background:#fee2e2;color:#991b1b;font-weight:600}
+table.fc{font-size:13px}table.fc td,table.fc th{padding:7px 3px;white-space:nowrap}
+tr[data-k]{cursor:pointer}tr.neg td{background:#fee2e2}tr.low td{border-top:2px solid #b91c1c;border-bottom:2px solid #b91c1c}tr.yr td{font-weight:700;background:#f1f5f9}
+nav button{font-size:20px}
